@@ -1,105 +1,117 @@
 import streamlit as st
 import boto3
-import cv2
-import numpy as np
 from datetime import datetime
-from decimal import Decimal
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Employee Tracking System", page_icon="🏢", layout="wide")
-st.title("🏢 Employee Attendance & Tracking System")
+st.set_page_config(page_title="Enterprise Employee Tracking", page_icon="🏢", layout="wide")
 
 # AWS Constants
 REGION = "ap-south-1"
-TABLE_NAME = "StudentAttendanceLog"
+PROFILE_TABLE = "EmployeeProfile"
+LOGS_TABLE = "AttendanceLogs"
 COLLECTION_ID = "EmployeeFaces"
 
 # Initialize AWS Clients
 rek_client = boto3.client('rekognition', region_name=REGION)
 dynamodb = boto3.resource('dynamodb', region_name=REGION)
-table = dynamodb.Table(TABLE_NAME)
+profile_db = dynamodb.Table(PROFILE_TABLE)
+logs_db = dynamodb.Table(LOGS_TABLE)
 
-# --- APP LOGIC ---
+# --- NAVIGATION ---
+page = st.sidebar.radio("Main Menu", ["📸 Mark Attendance", "👤 HR Onboarding"])
 
-def process_attendance(image_bytes):
-    try:
-        # 1. AI Face Search in Collection
-        response = rek_client.search_faces_by_image(
-            CollectionId=COLLECTION_ID,
-            Image={'Bytes': image_bytes},
-            MaxFaces=1,
-            FaceMatchThreshold=90
-        )
-        
-        face_matches = response.get('FaceMatches', [])
-        
-        if not face_matches:
-            st.error("❌ Identity Not Recognized. Please Register first.")
-            return
-
-        # Extract Employee ID (Stored as ExternalImageId during registration)
-        employee_id = face_matches[0]['Face']['ExternalImageId']
-        confidence = face_matches[0]['Similarity']
-        
-        # 2. Check Today's History (Logic for Login/Logout)
-        today_date = datetime.now().strftime('%Y-%m-%d')
-        
-        # Query database for this specific employee
-        history = table.query(
-            KeyConditionExpression=boto3.dynamodb.conditions.Key('StudentId').eq(employee_id)
-        )
-        
-        # Filter for today's entries
-        today_entries = [item for item in history['Items'] if item['Timestamp'].startswith(today_date)]
-        
-        if len(today_entries) == 0:
-            action = "LOGIN"
-        elif len(today_entries) == 1:
-            action = "LOGOUT"
-        else:
-            st.warning(f"⚠️ Employee {employee_id} has already completed their shift (Login & Logout) for today.")
-            return
-
-        # 3. Log the Event
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        table.put_item(Item={
-            'StudentId': employee_id,
-            'Timestamp': timestamp,
-            'Action': action,
-            'Confidence': Decimal(str(round(confidence, 2)))
-        })
-        
-        st.success(f"✅ {action} Successful for Employee: {employee_id} at {timestamp}")
-
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
-
-# --- USER INTERFACE ---
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.header("📸 Biometric Capture")
-    img_file = st.camera_input("Position your face in the center")
+# --- PAGE 1: HR ONBOARDING (REGISTRATION) ---
+if page == "👤 HR Onboarding":
+    st.title("Employee Registration Portal")
+    st.info("Fill in the employee details and capture their face for biometric enrollment.")
     
-    if img_file:
-        bytes_data = img_file.getvalue()
-        process_attendance(bytes_data)
+    with st.form("reg_form"):
+        c1, c2 = st.columns(2)
+        with c1:
+            emp_id = st.text_input("Employee ID")
+            f_name = st.text_input("First Name")
+            l_name = st.text_input("Last Name")
+        with c2:
+            city = st.text_input("City")
+            state = st.text_input("State")
+            pin = st.text_input("Pin Code")
+        
+        photo = st.camera_input("Enrollment Photo")
+        submit = st.form_submit_button("Register New Employee")
 
-with col2:
-    st.header("📊 Today's Attendance Log")
-    if st.button("🔄 Refresh Dashboard"):
+    if submit and emp_id and photo:
         try:
-            # For demonstration/Admin view, we scan the whole table
-            resp = table.scan()
-            items = resp.get('Items', [])
-            if items:
-                # Sort by timestamp latest first
-                items = sorted(items, key=lambda x: x['Timestamp'], reverse=True)
-                st.table(items)
-            else:
-                st.info("No records found.")
+            # 1. Store in EmployeeProfile
+            profile_db.put_item(Item={
+                'EmployeeId': emp_id,
+                'FirstName': f_name,
+                'LastName': l_name,
+                'City': city,
+                'State': state,
+                'Pincode': pin
+            })
+            # 2. Index face in Collection
+            rek_client.index_faces(
+                CollectionId=COLLECTION_ID,
+                Image={'Bytes': photo.getvalue()},
+                ExternalImageId=emp_id,
+                MaxFaces=1
+            )
+            st.success(f"✅ Success! {f_name} is now registered.")
         except Exception as e:
-            st.error(f"Table Read Error: {e}")
+            st.error(f"Error: {str(e)}")
 
-st.info("💡 Note: This system automatically detects if you are logging in or out based on your daily history.")
+# --- PAGE 2: ATTENDANCE (AUTOMATED) ---
+elif page == "📸 Mark Attendance":
+    st.title("Smart Attendance Terminal")
+    st.write("Just look at the camera. The system will recognize you and log your time.")
+    
+    img = st.camera_input("Scan Face")
+    if img:
+        try:
+            # 1. Search Face
+            search = rek_client.search_faces_by_image(
+                CollectionId=COLLECTION_ID,
+                Image={'Bytes': img.getvalue()},
+                MaxFaces=1,
+                FaceMatchThreshold=90
+            )
+            
+            if not search.get('FaceMatches'):
+                st.error("❌ Identity Not Found. Please contact HR.")
+            else:
+                eid = search['FaceMatches'][0]['Face']['ExternalImageId']
+                
+                # 2. Get Name from Profile Table
+                person = profile_db.get_item(Key={'EmployeeId': eid}).get('Item', {})
+                name = person.get('FirstName', 'Employee')
+                
+                # 3. Check Today's Logs for Login/Logout
+                now = datetime.now()
+                today = now.strftime('%Y-%m-%d')
+                
+                history = logs_db.query(
+                    KeyConditionExpression=boto3.dynamodb.conditions.Key('EmployeeId').eq(eid)
+                )
+                today_entries = [i for i in history['Items'] if i['Timestamp'].startswith(today)]
+                
+                action = "LOGIN" if len(today_entries) == 0 else "LOGOUT"
+                
+                if len(today_entries) >= 2:
+                    st.warning(f"Hello {name}, you have already finished your shift today.")
+                else:
+                    logs_db.put_item(Item={
+                        'EmployeeId': eid,
+                        'Timestamp': now.strftime('%Y-%m-%d %H:%M:%S'),
+                        'ActionType': action
+                    })
+                    st.success(f"✅ {action} Successful: Hello {name} from {person.get('City')}!")
+                    st.balloons()
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+# --- DASHBOARD ---
+st.divider()
+if st.button("📊 View Live Attendance Records"):
+    recs = logs_db.scan().get('Items', [])
+    st.table(sorted(recs, key=lambda x: x['Timestamp'], reverse=True))
