@@ -35,7 +35,7 @@ if img_file_buffer is not None:
                 # Custom Validation Logic
                 if face['FaceOccluded']['Value']:
                     st.warning("FAILED: Please remove your face mask to mark attendance.")
-                elif face['Quality']['Sharpness'] < 50:
+                elif face['Quality']['Sharpness'] < 30:
                     st.warning("FAILED: Image too blurry. Possibly a spoof or billboard.")
                 else:
                     # 2. Recognition: Search in Collection
